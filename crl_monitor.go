@@ -40,17 +40,21 @@ type Work struct {
 	transport http.Transport
 	http_client http.Client
 	upsert_statement *sql.Stmt
+	update_changed_crl_statement *sql.Stmt
 }
 
 type WorkItem struct {
+	work *Work
 	ca_id int32
 	crl_url string
+	crl_size sql.NullInt64
 	this_update time.Time
 	next_update time.Time
 	last_checked time.Time
 	issuer_cert []byte
 	error_message sql.NullString
 	crl_sha256 [sha256.Size]byte
+	has_crl_changed bool
 }
 
 func checkRedirectURL(req *http.Request, via []*http.Request) error {
@@ -72,7 +76,9 @@ func (w *Work) Init() {
 // Work.Begin
 // Do any DB stuff that needs to happen before a batch of work.
 func (w *Work) Begin(db *sql.DB) {
-	us, err := db.Prepare(`
+	var err error
+
+	w.upsert_statement, err = db.Prepare(`
 INSERT INTO crl_revoked (
 	CA_ID, SERIAL_NUMBER, REASON_CODE,
 	REVOCATION_DATE, LAST_SEEN_CHECK_DATE
@@ -89,13 +95,26 @@ ON CONFLICT ON CONSTRAINT crlr_pk
 `)
 	checkErr(err)
 
-	w.upsert_statement = us
+	w.update_changed_crl_statement, err = db.Prepare(`
+UPDATE CRL
+	SET CRL_SHA256=$1,
+		THIS_UPDATE=$2::timestamp,
+		NEXT_UPDATE=$3::timestamp,
+		LAST_CHECKED=statement_timestamp(),
+		NEXT_CHECK_DUE=statement_timestamp() + interval '1 hour',
+		ERROR_MESSAGE=$4::text,
+		CRL_SIZE=$5
+	WHERE CA_ID=$6
+		AND DISTRIBUTION_POINT_URL=$7
+`)
+	checkErr(err)
 }
 
 // Work.End
 // Do any DB stuff that needs to happen after a batch of work.
 func (w *Work) End() {
 	w.upsert_statement.Close()
+	w.update_changed_crl_statement.Close()
 }
 
 // Work.Prepare()
@@ -133,8 +152,10 @@ func (wi *WorkItem) checkErr(err error) {
 // WorkItem.Perform()
 // Do the work for one item.
 func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
+	wi.work = w
 	wi.error_message.String = ""
 	wi.error_message.Valid = false
+	wi.has_crl_changed = false
 
 	// Retrieve the CRL
 	var err error
@@ -173,7 +194,12 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	}
 
 	// Progress report
-	log.Printf("Downloaded (%d bytes): %s", len(body), wi.crl_url)
+	wi.crl_size.Int64 = int64(len(body))
+	wi.crl_size.Valid = true
+	log.Printf("Downloaded (%d bytes): %s", wi.crl_size.Int64, wi.crl_url)
+
+	// Calculate SHA-256(CRL)
+	wi.crl_sha256 = sha256.Sum256(body)
 
 	// Parse the CRL
 	crl, err = x509.ParseCRL(body)
@@ -190,6 +216,8 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 		return
 	}
 
+	wi.has_crl_changed = true
+
 	// Parse the supplied issuer certificate
 	cert, err := x509.ParseCertificate(wi.issuer_cert)
 	checkErr(err)
@@ -200,9 +228,6 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 
 	// Show progress report
 	log.Printf("Verified: %s", wi.crl_url)
-
-	// Calculate SHA-256(CRL)
-	wi.crl_sha256 = sha256.Sum256(body)
 
 	// TODO: Check crl.HasExpired(time.Now) ?
 	// TODO: Set inactive if "latest" CRL is ancient?
@@ -259,19 +284,20 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 func (w *Work) UpdateStatement() string {
 	return `
 UPDATE crl
-	SET CRL_SHA256=$1,
-		THIS_UPDATE=$2::timestamp,
-		NEXT_UPDATE=$3::timestamp,
-		LAST_CHECKED=statement_timestamp(),
+	SET LAST_CHECKED=statement_timestamp(),
 		NEXT_CHECK_DUE=statement_timestamp() + interval '1 hour',
-		ERROR_MESSAGE=$4::text
-	WHERE CA_ID=$5
-		AND DISTRIBUTION_POINT_URL=$6
+		ERROR_MESSAGE=$1::text
+	WHERE CA_ID=$2
+		AND DISTRIBUTION_POINT_URL=$3
 `
 }
 
 // WorkItem.Update()
 // Update the DB with the results of the work for this item.
 func (wi *WorkItem) Update(update_statement *sql.Stmt) (sql.Result, error) {
-	return update_statement.Exec(wi.crl_sha256[:], wi.this_update, wi.next_update, wi.error_message, wi.ca_id, wi.crl_url)
+	if wi.has_crl_changed {
+		return wi.work.update_changed_crl_statement.Exec(wi.crl_sha256[:], wi.this_update, wi.next_update, wi.error_message, wi.crl_size, wi.ca_id, wi.crl_url)
+	} else {
+		return update_statement.Exec(wi.error_message, wi.ca_id, wi.crl_url)
+	}
 }
