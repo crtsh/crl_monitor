@@ -64,7 +64,7 @@ func checkRedirectURL(req *http.Request, via []*http.Request) error {
 }
 
 func (w *Work) CustomFlags() string {
-	flag.DurationVar(&w.timeout, "timeout", 15 * time.Second, "HTTP timeout")
+	flag.DurationVar(&w.timeout, "timeout", 30 * time.Second, "HTTP timeout")
 	return fmt.Sprintf("  timeout: %s\n", w.timeout)
 }
 
