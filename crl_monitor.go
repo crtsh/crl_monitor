@@ -86,12 +86,12 @@ INSERT INTO crl_revoked (
 VALUES (
 	$1, decode($2, 'hex'), $3::smallint,
 	$4,
-	statement_timestamp()
+	statement_timestamp() AT TIME ZONE 'UTC'
 )
 ON CONFLICT ON CONSTRAINT crlr_pk
 	DO UPDATE SET REASON_CODE = $3::smallint,
 	REVOCATION_DATE = $4,
-	LAST_SEEN_CHECK_DATE = statement_timestamp()
+	LAST_SEEN_CHECK_DATE = statement_timestamp() AT TIME ZONE 'UTC'
 `)
 	checkErr(err)
 
@@ -100,8 +100,8 @@ UPDATE CRL
 	SET CRL_SHA256=$1,
 		THIS_UPDATE=$2::timestamp,
 		NEXT_UPDATE=$3::timestamp,
-		LAST_CHECKED=statement_timestamp(),
-		NEXT_CHECK_DUE=statement_timestamp() + interval '1 hour',
+		LAST_CHECKED=statement_timestamp() AT TIME ZONE 'UTC',
+		NEXT_CHECK_DUE=statement_timestamp() AT TIME ZONE 'UTC' + interval '1 hour',
 		ERROR_MESSAGE=$4::text,
 		CRL_SIZE=$5
 	WHERE CA_ID=$6
@@ -129,7 +129,7 @@ SELECT crl.CA_ID, crl.DISTRIBUTION_POINT_URL, coalesce(crl.THIS_UPDATE, 'epoch':
 				AND cac.CERTIFICATE_ID = c.ID
 			LIMIT 1) c ON TRUE
 	WHERE crl.IS_ACTIVE = 't'
-		AND crl.NEXT_CHECK_DUE < statement_timestamp()
+		AND crl.NEXT_CHECK_DUE < statement_timestamp() AT TIME ZONE 'UTC'
 	ORDER BY crl.IS_ACTIVE, crl.NEXT_CHECK_DUE
 	LIMIT %d
 `, batch_size)
@@ -284,8 +284,8 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 func (w *Work) UpdateStatement() string {
 	return `
 UPDATE crl
-	SET LAST_CHECKED=statement_timestamp(),
-		NEXT_CHECK_DUE=statement_timestamp() + interval '1 hour',
+	SET LAST_CHECKED=statement_timestamp() AT TIME ZONE 'UTC',
+		NEXT_CHECK_DUE=statement_timestamp() AT TIME ZONE 'UTC' + interval '1 hour',
 		ERROR_MESSAGE=$1::text
 	WHERE CA_ID=$2
 		AND DISTRIBUTION_POINT_URL=$3
