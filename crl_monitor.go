@@ -25,6 +25,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"database/sql"
+	"encoding/asn1"
 	"errors"
 	"flag"
 	"fmt"
@@ -84,7 +85,7 @@ INSERT INTO crl_revoked (
 	REVOCATION_DATE, LAST_SEEN_CHECK_DATE
 )
 VALUES (
-	$1, decode($2, 'hex'), $3::smallint,
+	$1, $2, $3::smallint,
 	$4,
 	statement_timestamp() AT TIME ZONE 'UTC'
 )
@@ -253,26 +254,21 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 			}
 		}
 
-		// Convert the revoked serial number to a hex string
-		var serial_string = fmt.Sprintf("%X", revoked_cert.SerialNumber)
-		if revoked_cert.SerialNumber.Sign() >= 0 {
-			if len(serial_string) % 2 != 0 {
-				serial_string = "0" + serial_string
-			} else if serial_string[0] >= 56 {	// 56 = "8" in ASCII
-				serial_string = "00" + serial_string
-			}
+		// Get the bytes of the encoded serial number
+		serial_bytes, err := asn1.Marshal(revoked_cert.SerialNumber)
+		wi.checkErr(err)
+		if serial_bytes[1] > 0x7F {
+			log.Printf("Serial number has multiple length octets")
 		} else {
-			// TODO: Handle negative serial numbers properly
-			log.Printf("NEGATIVE serial number: %X", revoked_cert.SerialNumber)
-		}
-
-		// UPSERT this CRL entry
-		result, err := stmt.Exec(wi.ca_id, serial_string, reason_code, revoked_cert.RevocationTime)
-		wi.checkErr(err)
-		rows_affected, err := result.RowsAffected()
-		wi.checkErr(err)
-		if rows_affected != 1 {
-			wi.checkErr(errors.New("UPSERT failed"))
+			// UPSERT this CRL entry
+			// The [2:] strips the ASN.1 tag and length octets.
+			result, err := stmt.Exec(wi.ca_id, serial_bytes[2:], reason_code, revoked_cert.RevocationTime)
+			wi.checkErr(err)
+			rows_affected, err := result.RowsAffected()
+			wi.checkErr(err)
+			if rows_affected != 1 {
+				wi.checkErr(errors.New("UPSERT failed"))
+			}
 		}
 	}
 
