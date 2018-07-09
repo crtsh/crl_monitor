@@ -48,7 +48,7 @@ func doUpdateWorkItem(wi *WorkItem, update_statement *sql.Stmt) {
 	result, err := wi.Update(update_statement)
 	if err != nil {
 		log.Printf("ERROR: UPDATE failed (%v)\n", err.Error)
-	} else {
+	} else if result != nil {
 		rows_affected, err := result.RowsAffected()
 		if err != nil {
 			log.Printf("ERROR: UPDATE failed (%v)\n", err.Error)
@@ -70,9 +70,12 @@ func doBatchOfWork(db *sql.DB, w *Work, batch_size int, concurrent_items int) in
 	defer rows.Close()
 
 	// Prepare the UPDATE statement that will be run after performing each work item
-	update_statement, err := db.Prepare(w.UpdateStatement())
-	checkErr(err)
-	defer update_statement.Close()
+	var update_statement *sql.Stmt
+	if w.UpdateStatement() != "" {
+		update_statement, err = db.Prepare(w.UpdateStatement())
+		checkErr(err)
+		defer update_statement.Close()
+	}
 
 	// Do the batch of work, throttling the number of concurrent work items
 	log.Println("Performing...")
@@ -91,7 +94,7 @@ func doBatchOfWork(db *sql.DB, w *Work, batch_size int, concurrent_items int) in
 			defer doUpdateWorkItem(&wi, update_statement)
 			chan_concurrency <- 1
 			defer func() { <-chan_concurrency }()
-			defer recoverErr(wi.crl_url)
+			defer recoverErr(wi.distribution_point_url)
 			wi.Perform(db, w)
 		}()
 	}
