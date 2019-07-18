@@ -55,6 +55,7 @@ type WorkItem struct {
 	error_message sql.NullString
 	crl_sha256 [sha256.Size]byte
 	start_time time.Time
+	already_updated bool
 }
 
 func checkRedirectURL(req *http.Request, via []*http.Request) error {
@@ -138,6 +139,7 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	wi.error_message.String = ""
 	wi.error_message.Valid = false
 	wi.crl_size.Valid = false
+	wi.already_updated = false
 
 	// Retrieve the CRL
 	var err error
@@ -177,6 +179,7 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 
 	// Progress report
 	wi.crl_size.Int64 = int64(len(body))
+	wi.crl_size.Valid = true
 	log.Printf("Downloaded (%d bytes): %s", wi.crl_size.Int64, wi.distribution_point_url)
 
 	// Calculate SHA-256(CRL)
@@ -184,7 +187,12 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 
 	// Parse the CRL
 	crl, err = x509.ParseCRL(body)
-	wi.checkErr(err)
+	if err != nil {
+		log.Printf("x509.ParseCRL() => %v", err)
+		wi.error_message.String = err.Error()
+		wi.error_message.Valid = true
+		return
+	}
 
 	// Extract various fields from this CRL
 	var temp_this_update = wi.this_update
@@ -197,16 +205,18 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 		return
 	}
 
-	// We will use the wi.crl_size.Valid boolean to also signal whether or not the CRL has changed.
-	wi.crl_size.Valid = true
-
 	// Parse the supplied issuer certificate
 	cert, err := x509.ParseCertificate(wi.issuer_cert)
 	wi.checkErr(err)
 
 	// Check this CRL's signature using the supplied issuer certificate
 	err = cert.CheckCRLSignature(crl)
-	wi.checkErr(err)
+	if err != nil {
+		log.Printf("cert.CheckCRLSignature() => %v", err)
+		wi.error_message.String = err.Error()
+		wi.error_message.Valid = true
+		return
+	}
 
 	// Show progress report
 	log.Printf("Verified: %s", wi.distribution_point_url)
@@ -275,6 +285,7 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	wi.checkErr(err)
 
 	log.Printf("Processed (%d revocations): %s (%v)", len(crl.TBSCertList.RevokedCertificates), wi.distribution_point_url, time.Now().UTC().Sub(wi.start_time))
+	wi.already_updated = true
 }
 
 // Work.UpdateStatement()
@@ -283,7 +294,7 @@ func (w *Work) UpdateStatement() string {
 	return `
 UPDATE crl
 	SET LAST_CHECKED=statement_timestamp() AT TIME ZONE 'UTC',
-		NEXT_CHECK_DUE=statement_timestamp() AT TIME ZONE 'UTC' + interval '1 hour',
+		NEXT_CHECK_DUE=statement_timestamp() AT TIME ZONE 'UTC' + interval '4 hours',
 		ERROR_MESSAGE=$1::text
 	WHERE CA_ID=$2
 		AND DISTRIBUTION_POINT_URL=$3
@@ -293,7 +304,7 @@ UPDATE crl
 // WorkItem.Update()
 // Update the DB with the results of the work for this item.
 func (wi *WorkItem) Update(update_statement *sql.Stmt) (sql.Result, error) {
-	if !wi.crl_size.Valid {
+	if !wi.already_updated {
 		return update_statement.Exec(wi.error_message, wi.ca_id, wi.distribution_point_url)
 	} else {
 		return nil, nil
