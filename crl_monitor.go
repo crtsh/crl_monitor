@@ -1,21 +1,3 @@
-/* crl_monitor - Certificate Revocation List Monitor
- * Written by Rob Stradling
- * Copyright (C) 2016-2017 COMODO CA Limited
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
-
 package main
 
 import (
@@ -36,8 +18,23 @@ import (
 	"time"
 )
 
+type config struct {
+	// Common configuration parameters shared by all processors.
+	ConnInfo string
+	ConnOpen int
+	ConnIdle int
+	ConnLife duration
+	Interval duration
+	Batch int
+	Concurrent int
+	// Processor-specific config.
+	Chunk int
+	HTTPTimeout duration
+}
+
 type Work struct {
-	timeout time.Duration
+	c *config
+	db *sql.DB
 	transport http.Transport
 	http_client http.Client
 	create_temp_table_statement *sql.Stmt
@@ -58,28 +55,31 @@ type WorkItem struct {
 	already_updated bool
 }
 
+
 func checkRedirectURL(req *http.Request, via []*http.Request) error {
 	// Fixup incorrectly encoded redirect URLs
 	req.URL.RawQuery = strings.Replace(req.URL.RawQuery, " ", "%20", -1)
 	return nil
 }
 
-func (w *Work) CustomFlags() string {
-	flag.DurationVar(&w.timeout, "timeout", 30 * time.Second, "HTTP timeout")
-	return fmt.Sprintf("  timeout: %s\n", w.timeout)
+// tomlConfig.DefineCustomFlags() and tomlConfig.PrintCustomFlags()
+// Specify command-line flags that are specific to this processor.
+func (c *config) DefineCustomFlags() {
+	flag.DurationVar(&c.HTTPTimeout.Duration, "httptimeout", c.HTTPTimeout.Duration, "HTTP timeout")
+}
+func (c *config) PrintCustomFlags() string {
+	return fmt.Sprintf("httptimeout:%s", c.HTTPTimeout.Duration)
 }
 
-func (w *Work) Init() {
+
+func (w *Work) Init(c *config) {
+	w.c = c
 	w.transport = http.Transport { TLSClientConfig: &tls.Config { InsecureSkipVerify: true } }
-	w.http_client = http.Client { CheckRedirect: checkRedirectURL, Timeout: w.timeout, Transport: &w.transport }
-}
+	w.http_client = http.Client { CheckRedirect: checkRedirectURL, Timeout: c.HTTPTimeout.Duration, Transport: &w.transport }
 
-// Work.Begin
-// Do any DB stuff that needs to happen before a batch of work.
-func (w *Work) Begin(db *sql.DB) {
 	var err error
 
-	w.create_temp_table_statement, err = db.Prepare(`
+	w.create_temp_table_statement, err = w.db.Prepare(`
 CREATE TEMP TABLE crl_revoked_import_temp (
 	SERIAL_NUMBER bytea,
 	REASON_CODE smallint,
@@ -88,13 +88,23 @@ CREATE TEMP TABLE crl_revoked_import_temp (
 `)
 	checkErr(err)
 
-	w.crl_update_statement, err = db.Prepare("SELECT crl_update($1,$2,$3,$4,$5,$6,$7,$8)")
+	w.crl_update_statement, err = w.db.Prepare("SELECT crl_update($1,$2,$3,$4,$5,$6,$7,$8)")
 	checkErr(err)
+}
+
+// Work.Begin
+// Do any DB stuff that needs to happen before a batch of work.
+func (w *Work) Begin(db *sql.DB) {
 }
 
 // Work.End
 // Do any DB stuff that needs to happen after a batch of work.
 func (w *Work) End() {
+}
+
+// Work.Exit
+// One-time program exit code.
+func (w *Work) Exit() {
 	w.create_temp_table_statement.Close()
 	w.crl_update_statement.Close()
 }
