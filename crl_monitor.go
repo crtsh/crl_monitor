@@ -131,15 +131,25 @@ func (w *Work) Exit() {
 // Prepare the driving SELECT query.
 func (w *Work) SelectQuery(batch_size int) string {
 	return fmt.Sprintf(`
-SELECT crl.CA_ID, crl.DISTRIBUTION_POINT_URL, coalesce(crl.THIS_UPDATE, 'epoch'::timestamp), coalesce(crl.NEXT_UPDATE, 'epoch'::timestamp), c.CERTIFICATE
-	FROM crl LEFT JOIN LATERAL
-		(SELECT c.CERTIFICATE
-			FROM ca_certificate cac, certificate c
-			WHERE crl.CA_ID = cac.CA_ID
-				AND cac.CERTIFICATE_ID = c.ID
-			LIMIT 1) c ON TRUE
+SELECT crl.CA_ID, crl.DISTRIBUTION_POINT_URL, coalesce(crl.THIS_UPDATE, 'epoch'::timestamp), coalesce(crl.NEXT_UPDATE, 'epoch'::timestamp), coalesce(c2.CERTIFICATE, c1.CERTIFICATE)
+	FROM crl
+		LEFT JOIN LATERAL (
+			SELECT c1.CERTIFICATE, c1.ISSUER_CA_ID
+				FROM ca_certificate cac1, certificate c1
+				WHERE crl.CA_ID = cac1.CA_ID
+					AND cac1.CERTIFICATE_ID = c1.ID
+				LIMIT 1
+		) c1 ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT c2.CERTIFICATE
+				FROM ca_certificate cac2, certificate c2
+				WHERE cac2.CA_ID = c1.ISSUER_CA_ID
+					AND cac2.CERTIFICATE_ID = c2.ID
+					AND EXISTS (SELECT 1 FROM x509_extKeyUsages(c1.CERTIFICATE) WHERE x509_extKeyUsages = '1.3.6.1.4.1.11129.2.4.4')
+				LIMIT 1
+		) c2 ON TRUE
 	WHERE crl.IS_ACTIVE = 't'
-		AND crl.NEXT_CHECK_DUE < statement_timestamp() AT TIME ZONE 'UTC'
+		AND crl.NEXT_CHECK_DUE < now() AT TIME ZONE 'UTC'
 	ORDER BY crl.IS_ACTIVE, crl.NEXT_CHECK_DUE
 	LIMIT %d
 `, batch_size)
