@@ -95,9 +95,10 @@ func (w *Work) Init(c *config) {
 
 	w.create_temp_table_statement, err = w.db.Prepare(`
 CREATE TEMP TABLE crl_revoked_import_temp (
-	SERIAL_NUMBER bytea,
+	SEQUENCE_NUMBER bigint,
+	REVOCATION_DATE timestamp,
 	REASON_CODE smallint,
-	REVOCATION_DATE timestamp
+	SERIAL_NUMBER bytea
 ) ON COMMIT DROP
 `)
 	checkErr(err)
@@ -276,7 +277,7 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 
 	if crl.RevokedCertificateEntries != nil {
 		// Prepare the COPY statement.
-		tx_copy_item_statement, err := tx.Prepare("COPY crl_revoked_import_temp(serial_number, reason_code, revocation_date) FROM STDIN")
+		tx_copy_item_statement, err := tx.Prepare("COPY crl_revoked_import_temp(revocation_date, reason_code, serial_number) FROM STDIN")
 		wi.checkErr(err)
 
 		// Loop through the revoked certs, adding each one to the bulk import.
@@ -300,7 +301,7 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 				log.Printf("Serial number has multiple length octets")
 			} else {
 				// The [2:] strips the ASN.1 tag and length octets.
-				_, err = tx_copy_item_statement.Exec(serial_bytes[2:], reason_code, rce.RevocationTime)
+				_, err = tx_copy_item_statement.Exec(rce.RevocationTime, reason_code, serial_bytes[2:])
 				wi.checkErr(err)
 			}
 		}
