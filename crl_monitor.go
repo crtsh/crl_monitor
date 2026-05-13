@@ -1,6 +1,6 @@
 /* crt.sh: crl_monitor - CRL Monitor
  * Written by Rob Stradling
- * Copyright (C) 2017-2020 Sectigo Limited
+ * Copyright (C) 2017-2026 Sectigo Limited
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,13 +23,11 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"database/sql"
 	"encoding/asn1"
 	"flag"
 	"fmt"
-	"github.com/lib/pq"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -38,41 +36,40 @@ import (
 
 type config struct {
 	// Common configuration parameters shared by all processors.
-	ConnInfo string
-	ConnOpen int
-	ConnIdle int
-	ConnLife duration
-	Interval duration
-	Batch int
+	ConnInfo   string
+	ConnOpen   int
+	ConnIdle   int
+	ConnLife   duration
+	Interval   duration
+	Batch      int
 	Concurrent int
 	// Processor-specific config.
-	Chunk int
+	Chunk       int
 	HTTPTimeout duration
 }
 
 type Work struct {
-	c *config
-	db *sql.DB
-	transport http.Transport
-	http_client http.Client
+	c                           *config
+	db                          *sql.DB
+	transport                   http.Transport
+	http_client                 http.Client
 	create_temp_table_statement *sql.Stmt
-	crl_update_statement *sql.Stmt
+	crl_update_statement        *sql.Stmt
 }
 
 type WorkItem struct {
-	work *Work
-	ca_id int32
+	work                   *Work
+	ca_id                  int32
 	distribution_point_url string
-	crl_size sql.NullInt64
-	this_update time.Time
-	next_update time.Time
-	issuer_cert []byte
-	error_message sql.NullString
-	crl_sha256 [sha256.Size]byte
-	start_time time.Time
-	already_updated bool
+	crl_size               sql.NullInt64
+	this_update            time.Time
+	next_update            time.Time
+	issuer_cert            []byte
+	error_message          sql.NullString
+	crl_sha256             [sha256.Size]byte
+	start_time             time.Time
+	already_updated        bool
 }
-
 
 func checkRedirectURL(req *http.Request, via []*http.Request) error {
 	// Fixup incorrectly encoded redirect URLs
@@ -89,11 +86,10 @@ func (c *config) PrintCustomFlags() string {
 	return fmt.Sprintf("httptimeout:%s", c.HTTPTimeout.Duration)
 }
 
-
 func (w *Work) Init(c *config) {
 	w.c = c
-	w.transport = http.Transport { TLSClientConfig: &tls.Config { InsecureSkipVerify: true } }
-	w.http_client = http.Client { CheckRedirect: checkRedirectURL, Timeout: c.HTTPTimeout.Duration, Transport: &w.transport }
+	w.transport = http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	w.http_client = http.Client{CheckRedirect: checkRedirectURL, Timeout: c.HTTPTimeout.Duration, Transport: &w.transport}
 
 	var err error
 
@@ -181,7 +177,7 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 
 	// Retrieve the CRL
 	var err error
-	var crl *pkix.CertificateList
+	var crl *x509.RevocationList
 	var body []byte
 	if strings.HasPrefix(strings.ToLower(wi.distribution_point_url), "ldap") {
 		// TODO: Support LDAP CRL URLs
@@ -211,7 +207,7 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 		}
 
 		// Extract the HTTP response body
-		body, err = ioutil.ReadAll(resp.Body)
+		body, err = io.ReadAll(resp.Body)
 		wi.checkErr(err)
 	}
 
@@ -224,7 +220,7 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	wi.crl_sha256 = sha256.Sum256(body)
 
 	// Parse the CRL
-	crl, err = x509.ParseCRL(body)
+	crl, err = x509.ParseRevocationList(body)
 	if err != nil {
 		log.Printf("x509.ParseCRL() => %v", err)
 		wi.error_message.String = err.Error()
@@ -234,8 +230,8 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 
 	// Extract various fields from this CRL
 	var temp_this_update = wi.this_update
-	wi.this_update = crl.TBSCertList.ThisUpdate
-	wi.next_update = crl.TBSCertList.NextUpdate
+	wi.this_update = crl.ThisUpdate
+	wi.next_update = crl.NextUpdate
 
 	// Check that this CRL is newer than the last one we processed
 	if temp_this_update.Sub(wi.this_update) >= 0 {
@@ -248,9 +244,9 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	wi.checkErr(err)
 
 	// Check this CRL's signature using the supplied issuer certificate
-	err = cert.CheckCRLSignature(crl)
+	err = crl.CheckSignatureFrom(cert)
 	if err != nil {
-		log.Printf("cert.CheckCRLSignature() => %v", err)
+		log.Printf("crl.CheckSignatureFrom(cert) => %v", err)
 		wi.error_message.String = err.Error()
 		wi.error_message.Valid = true
 		return
@@ -278,19 +274,19 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	_, err = tx_create_temp_table_statement.Exec()
 	wi.checkErr(err)
 
-	if crl.TBSCertList.RevokedCertificates != nil {
+	if crl.RevokedCertificateEntries != nil {
 		// Prepare the COPY statement.
-		tx_copy_item_statement, err := tx.Prepare(pq.CopyIn("crl_revoked_import_temp", "serial_number", "reason_code", "revocation_date"))
+		tx_copy_item_statement, err := tx.Prepare("COPY crl_revoked_import_temp(serial_number, reason_code, revocation_date) FROM STDIN")
 		wi.checkErr(err)
 
 		// Loop through the revoked certs, adding each one to the bulk import.
-		for _, revoked_cert := range crl.TBSCertList.RevokedCertificates {
+		for _, rce := range crl.RevokedCertificateEntries {
 			// Get the CRL Entry Reason Code (if specified)
 			var reason_code sql.NullInt64
 			reason_code.Valid = false
-			for _, ext := range revoked_cert.Extensions {
+			for _, ext := range rce.Extensions {
 				if ext.Id.Equal([]int{2, 5, 29, 21}) {
-					if bytes.HasPrefix(ext.Value, []byte{10, 1}) {	// ENUMERATED, length=1
+					if bytes.HasPrefix(ext.Value, []byte{10, 1}) { // ENUMERATED, length=1
 						reason_code.Int64 = int64(ext.Value[2])
 						reason_code.Valid = true
 					}
@@ -298,13 +294,13 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 			}
 
 			// Get the bytes of the encoded serial number
-			serial_bytes, err := asn1.Marshal(revoked_cert.SerialNumber)
+			serial_bytes, err := asn1.Marshal(rce.SerialNumber)
 			wi.checkErr(err)
 			if serial_bytes[1] > 0x7F {
 				log.Printf("Serial number has multiple length octets")
 			} else {
 				// The [2:] strips the ASN.1 tag and length octets.
-				_, err = tx_copy_item_statement.Exec(serial_bytes[2:], reason_code, revoked_cert.RevocationTime)
+				_, err = tx_copy_item_statement.Exec(serial_bytes[2:], reason_code, rce.RevocationTime)
 				wi.checkErr(err)
 			}
 		}
@@ -322,7 +318,7 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	err = tx.Commit()
 	wi.checkErr(err)
 
-	log.Printf("Processed (%d revocations): %s (%v)", len(crl.TBSCertList.RevokedCertificates), wi.distribution_point_url, time.Now().UTC().Sub(wi.start_time))
+	log.Printf("Processed (%d revocations): %s (%v)", len(crl.RevokedCertificateEntries), wi.distribution_point_url, time.Now().UTC().Sub(wi.start_time))
 	wi.already_updated = true
 }
 

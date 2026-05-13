@@ -1,6 +1,6 @@
 /* crt.sh: crl_monitor - CRL Monitor
  * Written by Rob Stradling
- * Copyright (C) 2017-2020 Sectigo Limited
+ * Copyright (C) 2017-2026 Sectigo Limited
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -29,6 +29,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
 	"github.com/BurntSushi/toml"
 	_ "github.com/lib/pq"
 )
@@ -150,7 +151,7 @@ func main() {
 	flag.Parse()
 
 	// Show configuration
-	log.Printf("[%s | r%s | %s] baseconfigfile:%s conninfo:%s connopen:%d connidle:%d connlife:%v interval:%v batch:%d concurrent:%d %s", os.Args[0][(strings.LastIndex(os.Args[0], "/") + 1):len(os.Args[0])], svn_revision, strings.Replace(build_date, ".", " ", 1), config_filename, c.ConnInfo, c.ConnOpen, c.ConnIdle, c.ConnLife.Duration, c.Interval.Duration, c.Batch, c.Concurrent, c.PrintCustomFlags())
+	log.Printf("[%s | r%s | %s] baseconfigfile:%s conninfo:%s connopen:%d connidle:%d connlife:%v interval:%v batch:%d concurrent:%d %s", os.Args[0][(strings.LastIndex(os.Args[0], "/")+1):len(os.Args[0])], svn_revision, strings.Replace(build_date, ".", " ", 1), config_filename, c.ConnInfo, c.ConnOpen, c.ConnIdle, c.ConnLife.Duration, c.Interval.Duration, c.Batch, c.Concurrent, c.PrintCustomFlags())
 
 	// Check configuration
 	if c.ConnInfo == "" {
@@ -194,10 +195,10 @@ func main() {
 
 			// Have a rest if possible.  Process any pending SIGINT or SIGTERM.
 			select {
-				case sig := <-chan_signals:
-					log.Printf("Signal received: %v\n", sig)
-					keep_looping = false
-				case <-time.After(next_time.Sub(time.Now())):
+			case sig := <-chan_signals:
+				log.Printf("Signal received: %v\n", sig)
+				keep_looping = false
+			case <-time.After(time.Until(next_time)):
 			}
 		}
 	}
